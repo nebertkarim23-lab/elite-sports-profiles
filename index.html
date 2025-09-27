@@ -1,0 +1,528 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Elite Sports Profile Generator</title>
+    <!-- Load Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Load Lucide Icons for React-like component use (easy HTML icons) -->
+    <!-- FIX: Switched to UMD bundle and global access to fix import error -->
+    <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
+    <script>
+        // Now calling lucide.createIcons() as it's exposed globally
+        window.createLucideIcons = () => lucide.createIcons();
+    </script>
+    <!-- Set Inter font and basic styles -->
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap');
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f1f5f9; /* Slate 100 */
+        }
+    </style>
+</head>
+<body class="min-h-screen flex flex-col">
+
+    <!-- Firebase SDK Imports -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, getDoc, setDoc, onSnapshot, collection, query, where, addDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        
+        // Use the global variables provided by the Canvas environment
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        let app, db, auth;
+        let userId = null;
+        let isAuthReady = false;
+
+        // Function to initialize Firebase
+        const initializeFirebase = async () => {
+            try {
+                // Set Firestore log level for debugging
+                setLogLevel('Debug');
+                
+                app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+                
+                // 1. Authenticate User
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(auth);
+                }
+
+                // 2. Set up Auth State Listener
+                onAuthStateChanged(auth, (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        console.log("Firebase Auth Successful. User ID:", userId);
+                    } else {
+                        // Use a random ID if anonymous sign-in failed or user signed out
+                        userId = crypto.randomUUID(); 
+                        console.log("Using Anonymous/Fallback User ID:", userId);
+                    }
+                    isAuthReady = true;
+                    window.appState.db = db;
+                    window.appState.userId = userId;
+                    window.appState.authReady = true;
+                    setupRealtimeListener();
+                });
+
+            } catch (error) {
+                console.error("Firebase Initialization Error:", error);
+                // Note: The element 'profile-content' does not exist in the HTML, 
+                // but we keep this log for good practice.
+                const fallbackEl = document.getElementById('dynamic-content') || document.body;
+                fallbackEl.innerHTML = `<div class="p-4 bg-red-100 border border-red-400 text-red-700 rounded-lg">Error initializing application. Check console for Firebase configuration issues.</div>`;
+            }
+        };
+
+        // Function to set up the Firestore listener for all public profiles
+        const setupRealtimeListener = () => {
+            if (!db || !isAuthReady) return;
+
+            const profilesRef = collection(db, `artifacts/${appId}/public/data/athlete-profiles`);
+            const q = query(profilesRef);
+
+            // Real-time listener
+            onSnapshot(q, (snapshot) => {
+                const profiles = [];
+                snapshot.forEach((doc) => {
+                    profiles.push({ id: doc.id, ...doc.data() });
+                });
+                console.log("Fetched Profiles:", profiles);
+                window.appState.allProfiles = profiles;
+                renderProfiles(profiles);
+            }, (error) => {
+                console.error("Error fetching documents:", error);
+            });
+        };
+
+        // Expose state and functions globally for HTML interaction
+        window.appState = {
+            db: null,
+            userId: null,
+            authReady: false,
+            allProfiles: [],
+            currentView: 'home',
+            loadingAI: false,
+            profileForm: {
+                name: '', sport: '', position: '', stats: '', goals: ''
+            }
+        };
+
+        window.initializeFirebase = initializeFirebase;
+        window.setupRealtimeListener = setupRealtimeListener;
+    </script>
+
+    <!-- Main Content -->
+    <main id="app-container" class="flex-grow p-4 sm:p-8">
+        <header class="bg-white shadow-lg rounded-xl mb-6 p-4 flex flex-col sm:flex-row justify-between items-center sticky top-0 z-10">
+            <h1 class="text-3xl font-extrabold text-blue-600 tracking-tight">
+                <i data-lucide="award" class="inline-block w-6 h-6 mr-2"></i> Elite Scout Hub
+            </h1>
+            <div class="flex space-x-3 mt-3 sm:mt-0">
+                <button onclick="changeView('home')" class="px-4 py-2 bg-blue-500 text-white font-semibold rounded-lg shadow-md hover:bg-blue-600 transition duration-150">
+                    <i data-lucide="home" class="inline-block w-4 h-4 mr-1"></i> Home
+                </button>
+                <button onclick="changeView('create')" class="px-4 py-2 bg-green-500 text-white font-semibold rounded-lg shadow-md hover:bg-green-600 transition duration-150">
+                    <i data-lucide="plus-circle" class="inline-block w-4 h-4 mr-1"></i> Create Profile
+                </button>
+            </div>
+        </header>
+
+        <!-- User/Auth Info -->
+        <div id="auth-info" class="text-center mb-6 p-2 bg-gray-200 rounded-lg text-sm text-gray-700">
+            <p>
+                <i data-lucide="user" class="inline-block w-4 h-4 mr-1"></i> User ID: <span id="display-user-id" class="font-mono text-xs bg-gray-300 p-1 rounded">Loading...</span>
+            </p>
+        </div>
+
+        <!-- Dynamic Content Area -->
+        <div id="dynamic-content">
+            <!-- Content will be rendered here -->
+        </div>
+    </main>
+
+    <!-- JavaScript Logic (Runs after content is loaded) -->
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            // Initialize Firebase on load
+            window.initializeFirebase();
+            
+            // Set initial view
+            changeView(window.appState.currentView);
+        });
+
+        const getUserId = () => window.appState.userId || 'anonymous-user';
+
+        // --- View Management ---
+        const changeView = (view, data = null) => {
+            window.appState.currentView = view;
+            const content = document.getElementById('dynamic-content');
+            
+            // Clear content and handle rendering based on view
+            content.innerHTML = '';
+            window.createLucideIcons(); // Refresh icons - now works using the global 'lucide' object
+
+            document.getElementById('display-user-id').textContent = getUserId();
+            
+            switch (view) {
+                case 'home':
+                    renderHomeView(content);
+                    break;
+                case 'create':
+                    renderCreateProfileForm(content);
+                    break;
+                case 'detail':
+                    renderProfileDetail(content, data);
+                    break;
+                default:
+                    renderHomeView(content);
+            }
+        };
+        window.changeView = changeView; // Make globally accessible
+
+        // --- Render Functions ---
+
+        const renderHomeView = (container) => {
+            container.innerHTML = `
+                <div class="text-center p-6 bg-white rounded-xl shadow-xl mb-6">
+                    <h2 class="text-2xl font-bold text-gray-800 mb-2">Public Athlete Profiles</h2>
+                    <p class="text-gray-600">View and analyze profiles created by scouts and athletes globally.</p>
+                </div>
+                <div id="profile-list" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                    <!-- Profiles will be loaded here by renderProfiles() -->
+                    <div class="col-span-full text-center text-gray-500 p-8">
+                        ${window.appState.authReady ? 'Loading profiles...' : 'Authenticating user and loading data...'}
+                    </div>
+                </div>
+            `;
+            // Call the render function to display the currently loaded profiles
+            renderProfiles(window.appState.allProfiles);
+            window.createLucideIcons();
+        };
+
+        const renderProfiles = (profiles) => {
+            const listContainer = document.getElementById('profile-list');
+            if (!listContainer) return;
+
+            if (!profiles || profiles.length === 0) {
+                 listContainer.innerHTML = `<p class="col-span-full text-center text-gray-500 p-8">No athlete profiles found. Be the first one to create a profile!</p>`;
+                 return;
+            }
+
+            listContainer.innerHTML = profiles.map(profile => `
+                <div class="bg-white rounded-xl shadow-lg hover:shadow-xl transition duration-300 overflow-hidden">
+                    <div class="p-6">
+                        <div class="flex items-center space-x-3 mb-4">
+                            <span class="p-3 bg-blue-100 text-blue-600 rounded-full">
+                                <i data-lucide="user-check" class="w-6 h-6"></i>
+                            </span>
+                            <div>
+                                <h3 class="text-xl font-bold text-gray-800">${profile.name}</h3>
+                                <p class="text-sm text-gray-500">${profile.sport} - ${profile.position}</p>
+                            </div>
+                        </div>
+                        <p class="text-gray-700 mb-4 line-clamp-3">${profile.statement || 'Statement not yet generated. Click to view details.'}</p>
+                        
+                        <button onclick="changeView('detail', ${JSON.stringify(profile).replace(/'/g, "\\'")})"
+                            class="w-full mt-2 py-2 bg-blue-500 text-white font-semibold rounded-lg hover:bg-blue-600 transition duration-150">
+                            View Profile
+                        </button>
+                    </div>
+                </div>
+            `).join('');
+            window.createLucideIcons();
+        };
+
+        const renderCreateProfileForm = (container) => {
+            const formHtml = `
+                <div class="max-w-3xl mx-auto bg-white p-8 rounded-xl shadow-xl">
+                    <h2 class="text-3xl font-bold text-gray-800 mb-6 border-b pb-2">Create New Athlete Profile</h2>
+                    <form id="profile-form" onsubmit="handleCreateProfile(event)">
+                        
+                        <div class="grid grid-cols-1 sm:grid-cols-2 gap-6 mb-6">
+                            <!-- Name -->
+                            <div>
+                                <label for="name" class="block text-sm font-medium text-gray-700 mb-1">Athlete Name</label>
+                                <input type="text" id="name" name="name" required class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500">
+                            </div>
+                            <!-- Sport -->
+                            <div>
+                                <label for="sport" class="block text-sm font-medium text-gray-700 mb-1">Sport</label>
+                                <input type="text" id="sport" name="sport" required class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500">
+                            </div>
+                        </div>
+
+                        <div class="grid grid-cols-1 sm:grid-cols-2 gap-6 mb-6">
+                            <!-- Position -->
+                            <div>
+                                <label for="position" class="block text-sm font-medium text-gray-700 mb-1">Position / Role</label>
+                                <input type="text" id="position" name="position" required class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500">
+                            </div>
+                            <!-- Key Stats -->
+                            <div>
+                                <label for="stats" class="block text-sm font-medium text-gray-700 mb-1">Key Stats / Achievements (e.g., 10 goals, 4.5 40-yard dash)</label>
+                                <textarea id="stats" name="stats" rows="2" required class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 resize-none"></textarea>
+                            </div>
+                        </div>
+
+                        <!-- Career Goals -->
+                        <div class="mb-6">
+                            <label for="goals" class="block text-sm font-medium text-gray-700 mb-1">Career Aspirations / Goals</label>
+                            <textarea id="goals" name="goals" rows="3" required class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 resize-none"></textarea>
+                        </div>
+                        
+                        <div id="form-message" class="mb-4 text-center text-sm font-medium text-red-600 hidden"></div>
+
+                        <button type="submit" id="submit-btn" class="w-full py-3 bg-indigo-600 text-white font-bold rounded-lg shadow-lg hover:bg-indigo-700 transition duration-200 disabled:bg-gray-400" disabled>
+                            <i data-lucide="loader" class="animate-spin w-5 h-5 mr-2 inline-block" id="loading-icon" style="display: none;"></i>
+                            Submit and Generate Profile
+                        </button>
+                        <p class="text-xs text-gray-500 mt-2 text-center">Note: Profile submission will use AI to generate a professional statement.</p>
+                    </form>
+                </div>
+            `;
+            container.innerHTML = formHtml;
+            window.createLucideIcons();
+            
+            // Enable button once Firebase is ready
+            const submitBtn = document.getElementById('submit-btn');
+            const loadingIconEl = document.getElementById('loading-icon');
+            if (window.appState.authReady) {
+                submitBtn.disabled = false;
+                if (loadingIconEl) loadingIconEl.style.display = 'none';
+            } else {
+                if (loadingIconEl) loadingIconEl.style.display = 'inline-block';
+            }
+        };
+
+        const renderProfileDetail = (container, profile) => {
+             const detailHtml = `
+                <div class="max-w-4xl mx-auto bg-white p-8 rounded-xl shadow-xl">
+                    <div class="flex items-center justify-between border-b pb-4 mb-6">
+                        <h2 class="text-4xl font-extrabold text-gray-800">${profile.name}</h2>
+                        <span class="px-4 py-1 bg-blue-100 text-blue-800 font-semibold rounded-full text-lg">
+                            ${profile.sport} - ${profile.position}
+                        </span>
+                    </div>
+
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-8">
+                        <!-- Left Column: Core Data -->
+                        <div>
+                            <h3 class="text-2xl font-bold text-blue-600 mb-3"><i data-lucide="bar-chart-2" class="inline-block w-5 h-5 mr-2"></i> Key Metrics</h3>
+                            <div class="space-y-4 text-gray-700">
+                                <p class="text-lg"><strong>Created By:</strong> <span class="font-mono text-sm bg-gray-100 p-1 rounded">${profile.creatorId}</span></p>
+                                <div class="bg-gray-50 p-4 rounded-lg shadow-inner">
+                                    <h4 class="font-semibold text-gray-600 mb-1">Statistics & Achievements:</h4>
+                                    <ul class="list-disc list-inside ml-4 text-sm whitespace-pre-wrap">${profile.stats.split('\n').map(s => `<li>${s.trim()}</li>`).join('')}</ul>
+                                </div>
+                                <div class="bg-gray-50 p-4 rounded-lg shadow-inner">
+                                    <h4 class="font-semibold text-gray-600 mb-1">Career Goals:</h4>
+                                    <p class="whitespace-pre-wrap text-sm">${profile.goals}</p>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Right Column: AI-Generated Statement -->
+                        <div>
+                            <h3 class="text-2xl font-bold text-green-600 mb-3"><i data-lucide="robot" class="inline-block w-5 h-5 mr-2"></i> Professional Statement (AI-Generated)</h3>
+                            <div class="bg-green-50 border border-green-300 p-4 rounded-lg shadow-md min-h-40">
+                                <p class="text-gray-800 whitespace-pre-wrap" id="ai-statement-content">${profile.statement || 'Statement generation failed or is still processing...'}</p>
+                            </div>
+
+                            <button onclick="regenerateStatement('${profile.id}', '${profile.name}', '${profile.sport}', '${profile.position}', '${profile.stats}', '${profile.goals}')" 
+                                id="regenerate-btn"
+                                class="w-full mt-4 py-2 bg-indigo-500 text-white font-semibold rounded-lg hover:bg-indigo-600 transition duration-150 disabled:bg-gray-400"
+                                ${window.appState.loadingAI ? 'disabled' : ''}>
+                                <i data-lucide="refresh-cw" class="w-4 h-4 mr-2 inline-block"></i>
+                                Regenerate Statement
+                            </button>
+                            <p id="regen-status" class="text-xs text-center mt-2 text-gray-500"></p>
+                        </div>
+                    </div>
+                    
+                    <div class="mt-8 pt-6 border-t">
+                        <button onclick="changeView('home')" class="py-2 px-4 bg-gray-500 text-white font-semibold rounded-lg hover:bg-gray-600 transition duration-150">
+                            <i data-lucide="arrow-left" class="inline-block w-4 h-4 mr-1"></i> Back to Profiles
+                        </button>
+                    </div>
+                </div>
+            `;
+            container.innerHTML = detailHtml;
+            window.createLucideIcons();
+        };
+
+        // --- Firebase Interaction ---
+
+        const handleCreateProfile = async (event) => {
+            event.preventDefault();
+            const form = event.target;
+            const submitBtn = document.getElementById('submit-btn');
+            const loadingIcon = document.getElementById('loading-icon');
+            const messageEl = document.getElementById('form-message');
+
+            if (!window.appState.db || !window.appState.authReady) {
+                messageEl.textContent = 'Application is still loading. Please wait a moment.';
+                messageEl.classList.remove('hidden');
+                return;
+            }
+
+            submitBtn.disabled = true;
+            loadingIcon.style.display = 'inline-block';
+            messageEl.classList.add('hidden');
+            messageEl.textContent = '';
+            
+            try {
+                const newProfile = {
+                    name: form.name.value,
+                    sport: form.sport.value,
+                    position: form.position.value,
+                    stats: form.stats.value,
+                    goals: form.goals.value,
+                    creatorId: getUserId(),
+                    createdAt: serverTimestamp(),
+                    statement: 'Generating statement...'
+                };
+
+                const profilesRef = collection(window.appState.db, `artifacts/${window.appId}/public/data/athlete-profiles`);
+                const docRef = await addDoc(profilesRef, newProfile);
+                
+                // Immediately start AI generation and update the document
+                const prompt = `Act as a professional sports scout and write a concise, compelling personal statement (max 150 words) for an athlete with the following details. Do not use bullet points or headings, just write the paragraph.\n\nName: ${newProfile.name}\nSport: ${newProfile.sport}\nPosition: ${newProfile.position}\nKey Stats: ${newProfile.stats}\nCareer Goals: ${newProfile.goals}`;
+                
+                messageEl.textContent = 'Profile saved! Generating professional statement with AI...';
+                messageEl.classList.remove('hidden', 'text-red-600');
+                messageEl.classList.add('text-blue-600');
+
+                const statement = await generateAiContent(prompt);
+                
+                // Update the document with the generated statement
+                const docToUpdateRef = doc(window.appState.db, `artifacts/${window.appId}/public/data/athlete-profiles`, docRef.id);
+                await setDoc(docToUpdateRef, { statement: statement }, { merge: true });
+
+                messageEl.textContent = 'Profile created and statement generated successfully!';
+                messageEl.classList.remove('text-blue-600');
+                messageEl.classList.add('text-green-600');
+
+                // Navigate to the newly created profile detail page
+                setTimeout(() => {
+                    changeView('detail', { ...newProfile, id: docRef.id, statement: statement });
+                }, 1500);
+
+            } catch (error) {
+                console.error("Error creating profile:", error);
+                messageEl.textContent = `Error: Failed to save profile or generate statement. ${error.message}`;
+                messageEl.classList.remove('hidden', 'text-blue-600');
+                messageEl.classList.add('text-red-600');
+            } finally {
+                submitBtn.disabled = false;
+                loadingIcon.style.display = 'none';
+            }
+        };
+        window.handleCreateProfile = handleCreateProfile;
+
+        const regenerateStatement = async (id, name, sport, position, stats, goals) => {
+            const regenerateBtn = document.getElementById('regenerate-btn');
+            const statusEl = document.getElementById('regen-status');
+            const statementContent = document.getElementById('ai-statement-content');
+            
+            regenerateBtn.disabled = true;
+            statementContent.textContent = 'Regenerating statement... Please wait.';
+            statusEl.textContent = 'Processing request...';
+            window.appState.loadingAI = true;
+
+            try {
+                const prompt = `Act as a professional sports scout and write a concise, compelling personal statement (max 150 words) for an athlete with the following details. Do not use bullet points or headings, just write the paragraph.\n\nName: ${name}\nSport: ${sport}\nPosition: ${position}\nKey Stats: ${stats}\nCareer Goals: ${goals}`;
+                const statement = await generateAiContent(prompt);
+                
+                // Update the document with the generated statement
+                const docToUpdateRef = doc(window.appState.db, `artifacts/${window.appId}/public/data/athlete-profiles`, id);
+                await setDoc(docToUpdateRef, { statement: statement }, { merge: true });
+
+                statementContent.textContent = statement;
+                statusEl.textContent = 'Statement successfully regenerated!';
+
+            } catch (error) {
+                console.error("Error regenerating statement:", error);
+                statementContent.textContent = 'Failed to regenerate statement. See console for details.';
+                statusEl.textContent = `Error: ${error.message}`;
+            } finally {
+                regenerateBtn.disabled = false;
+                window.appState.loadingAI = false;
+            }
+        };
+        window.regenerateStatement = regenerateStatement;
+
+        // --- Gemini API Interaction (LLM) ---
+
+        /**
+         * Generic function to call the Gemini API with exponential backoff.
+         * @param {string} userQuery - The main text prompt for the model.
+         */
+        async function generateAiContent(userQuery) {
+            const apiKey = ""; // Canvas will provide this in runtime
+            const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key=${apiKey}`;
+            const maxRetries = 5;
+            let delay = 1000;
+
+            const systemPrompt = "You are a specialized sports analyst and recruiter. Your task is to generate highly professional, concise, and compelling personal statements for athletes based on their data. Keep the tone formal yet encouraging.";
+            
+            const payload = {
+                contents: [{ parts: [{ text: userQuery }] }],
+                systemInstruction: {
+                    parts: [{ text: systemPrompt }]
+                },
+            };
+
+            for (let i = 0; i < maxRetries; i++) {
+                try {
+                    const response = await fetch(apiUrl, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+
+                    if (response.status === 429 && i < maxRetries - 1) {
+                        // Too Many Requests, retry
+                        await new Promise(resolve => setTimeout(resolve, delay));
+                        delay *= 2; // Exponential backoff
+                        continue;
+                    }
+
+                    if (!response.ok) {
+                        throw new Error(`API call failed with status ${response.status}`);
+                    }
+
+                    const result = await response.json();
+                    const text = result.candidates?.[0]?.content?.parts?.[0]?.text;
+
+                    if (!text) {
+                         // Handle cases where response structure is unexpected
+                        console.error("Gemini API response missing text:", result);
+                        return "Failed to generate statement: Empty response from AI.";
+                    }
+
+                    return text;
+
+                } catch (error) {
+                    console.error(`Attempt ${i + 1} failed:`, error);
+                    if (i === maxRetries - 1) {
+                        throw new Error("Failed to generate content after multiple retries.");
+                    }
+                    await new Promise(resolve => setTimeout(resolve, delay));
+                    delay *= 2; // Exponential backoff
+                }
+            }
+        }
+        window.generateAiContent = generateAiContent;
+    </script>
+</body>
+</html>
